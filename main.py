@@ -2,11 +2,13 @@ import socket
 import threading
 import select
 import os
+import json
 
 BROADCAST_PORT = 5000
 BROADCAST_IP = "192.168.0.255"
 MY_IP = os.environ['MY_IP']
-MY_PORT = os.environ['MY_PORT']
+MY_PORT = int(os.environ['MY_PORT'])
+
 
 class Server:
     def __init__(self):
@@ -40,14 +42,17 @@ class Server:
 
                 if m_type == "ACCEPT":
                     print("Received ACCEPT with ring:", message)
-                    # TODO: encoding and decoding
-                    self.ring = [message.split(",")]
+                    ring = json.loads(message)
+                    self.ring = ring
+                    self.neighbour_addr = ring[ring.index(self.pid) - 1]
 
                 elif m_type == "JOIN":
                     print("Received JOIN message", message)
                     if self.leader == self.pid:
-                        # TODO: encoding and decoding
-                        self.broadcast_socket.sendto(str.encode("ACCEPT: " + ",".join(self.ring)), (BROADCAST_IP, BROADCAST_PORT))
+                        self.ring.append(message)
+                        self.ring.sort()
+
+                        self.broadcast_socket.sendto(str.encode("ACCEPT: " + json.dumps(self.ring)), (BROADCAST_IP, BROADCAST_PORT))
 
                 elif m_type == "LEAVE":
                     print("Received LEAVE message", message)
@@ -55,23 +60,26 @@ class Server:
 
                 elif m_type == "ELECTION":
                     print("Received ELECTION message", message)
-                    self.handle_election(message)
+                    self.handle_election(json.loads(message))
 
     def send_join(self):
         self.broadcast_socket.sendto(str.encode("JOIN: " + self.pid), (BROADCAST_IP, BROADCAST_PORT))
 
         # TODO: check timeout to create ring with just us if nothing exists
+        threading.Timer(5, self.create_ring).start()
 
+    def create_ring(self):
+        """gets called if the initial JOIN message timed out which means there is no existing ring and we should create the initial one"""
+        self.ring = [self.pid]
+        self.leader = self.pid
 
     def handle_election(self, election_message):
-        # TODO: message format is wrong
-        # TODO: forward messages to neighbour
-
         if election_message['isLeader']:
             self.leader = election_message['mid']
             # forward received election message to left neighbour
             self.in_election =  False
-            # ring_socket.sendto(json.dumps(election_message).encode(), neighbour)
+            if self.neighbour_addr:
+                self.ring_socket.sendto(json.dumps(election_message).encode(), self.neighbour_addr)
 
         if election_message['mid'] < self.pid and not self.in_election:
             new_election_message = {
@@ -81,12 +89,14 @@ class Server:
 
             self.in_election = True
             # send received election message to left neighbour
-            #ring_socket.sendto(json.dumps(new_election_message).encode(), neighbour)
+            if self.neighbour_addr:
+                self.ring_socket.sendto(json.dumps(new_election_message).encode(), self.neighbour_addr)
 
         elif election_message['mid'] > self.pid:
             # send received election message to left neighbour
             self.in_election = True
-            #ring_socket.sendto(json.dumps(election_message).encode(), neighbour)
+            if self.neighbour_addr:
+                self.ring_socket.sendto(json.dumps(election_message).encode(), self.neighbour_addr)
 
         elif election_message['mid'] == self.pid:
             self.leader = self.pid
@@ -97,7 +107,8 @@ class Server:
 
             # send new election message to left neighbour
             self.in_election = False
-            #ring_socket.sendto(json.dumps(new_election_message).encode(), neighbour)
+            if self.neighbour_addr:
+                self.ring_socket.sendto(json.dumps(new_election_message).encode(), self.neighbour_addr)
 
     def close(self):
         self.broadcast_socket.close()
