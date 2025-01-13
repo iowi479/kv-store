@@ -32,6 +32,8 @@ class Server:
         self.ring = []
         self.neighbour_addr = None
         self.leader = None
+        self.kv_cache = {}
+        self.clients = []
 
         self.log(INFO, "Starting server")
 
