@@ -94,6 +94,36 @@ class Server:
                 elif m_type == "ELECTION":
                     self.log(ALL, "Received ELECTION message", message)
                     self.handle_election(json.loads(message))
+                    # TODO: Make sure all slaves have the same data as the leader
+
+                elif m_type == "STORE":
+                    if self.leader == self.pid:
+                        self.log(INFO, "Received STORE message", message)
+                        data = json.loads(message)
+                        if not data.get("key"):
+                            self.log(ERROR, "Invalid key 'None'", message)
+                        else:
+                            self.kv_cache[data.get("key")] = data.get("value")
+                            # TODO: Forward STORE message to all slaves
+                    else:
+                        self.log(ALL, "Ignoring STORE message because I'm not the leader...", message)
+
+
+                elif m_type == "RETRIEVE":
+                    if self.leader == self.pid:
+                        self.log(INFO, "Received RETRIEVE message", message)
+                        self.broadcast_socket.sendto(self.kv_cache.get(message), addr)
+                    else:
+                        self.log(ALL, "Ignoring RETRIEVE message because I'm not the leader...", message)
+
+
+                elif m_type == "REPLICATE":
+                    if self.leader == self.pid:
+                        self.log(ERROR, "Received REPLICATE message but I'm leader", message)
+                    else:
+                        self.log(INFO, "Replicating data from leader", message)
+                        data = json.loads(message)
+                        self.kv_cache = data
 
                 else:
                     self.log(ERROR, "Received unknown message", m_type, message)
