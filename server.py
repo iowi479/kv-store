@@ -94,7 +94,8 @@ class Server:
                 elif m_type == "ELECTION":
                     self.log(ALL, "Received ELECTION message", message)
                     self.handle_election(json.loads(message))
-                    # TODO: Make sure all slaves have the same data as the leader
+                    for addr in self.ring:
+                        self.ring_socket.sendto(str.encode("REPLICATE: ", json.dumps(self.kv_cache)), addr)
 
                 elif m_type == "STORE":
                     if self.leader == self.pid:
@@ -104,7 +105,8 @@ class Server:
                             self.log(ERROR, "Invalid key 'None'", message)
                         else:
                             self.kv_cache[data.get("key")] = data.get("value")
-                            # TODO: Forward STORE message to all slaves
+                            for addr in self.ring:
+                                self.ring_socket.sendto(message, addr)
                     else:
                         self.log(ALL, "Ignoring STORE message because I'm not the leader...", message)
 
