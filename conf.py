@@ -1,0 +1,22 @@
+from os import environ
+
+
+BROADCAST_PORT = 5000
+BROADCAST_IP = "192.168.0.255"
+MY_IP = environ['MY_IP']
+MY_PORT = int(environ['MY_PORT'])
+
+JOIN_TIMEOUT = 1
+CONNECT_TIMEOUT = 2
+HEARTBEAT_INTERVAL = 10
+HEARTBEAT_TIMEOUT = 3
+
+
+# logging
+
+ALL = 3
+INFO = 2
+ERROR = 1
+NONE = 0
+
+LOGGING_LEVEL = ALL

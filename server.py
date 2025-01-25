@@ -1,26 +1,6 @@
-import socket
-import threading
-from threading import Timer
-import select
-import os
-import json
-import sys
-import time
-
-ALL = 3
-INFO = 2
-ERROR = 1
-NONE = 0
-
-LOGGING_LEVEL = ALL
-BROADCAST_PORT = 5000
-BROADCAST_IP = "192.168.0.255"
-MY_IP = os.environ['MY_IP']
-MY_PORT = int(os.environ['MY_PORT'])
-
-HEARTBEAT_INTERVAL = 10
-HEARTBEAT_TIMEOUT = 3
-JOIN_TIMEOUT = 1
+import socket, threading, select, json, time
+from utils import addr_from_pid, check_input
+from conf import BROADCAST_PORT, BROADCAST_IP, MY_IP, MY_PORT, JOIN_TIMEOUT, HEARTBEAT_INTERVAL, HEARTBEAT_TIMEOUT, ALL, INFO, ERROR, LOGGING_LEVEL
 
 
 class Server:
@@ -29,7 +9,8 @@ class Server:
             print("[" + self.pid + "]", *messages)
 
     def __init__(self):
-        self.listening = True
+        self.running = True
+
         self.pid = MY_IP + ":" + str(MY_PORT)
         self.in_election = False
         self.ring = []
@@ -51,14 +32,142 @@ class Server:
         self.ring_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         self.ring_socket.bind(('', MY_PORT))
 
+        self.client_socket = None
+
+
+        self.rep = None
+        self.replication = []
+
+
+    def start(self):
         threading.Thread(target=self.listen).start()
         threading.Thread(target=self.monitor_heartbeats).start()
 
         self.send_join();
 
-    def addr_from_pid(self, pid) -> tuple[str, int]:
-        ip, port = pid.split(":")
-        return (ip, int(port))
+    def set_leader(self, leader):
+        if leader == self.pid:
+            self.leader = leader
+            self.client_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            self.client_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            self.client_socket.bind(('', 0))
+
+            self.client_socket_addr = MY_IP + ":" + str(self.client_socket.getsockname()[1])
+
+            self.listening_for_clients = True
+            threading.Thread(target=self.listen_for_clients).start()
+
+            return
+
+        if self.leader == self.pid:
+            self.log(INFO, "Im not leader anymore, closing client socket")
+            self.listening_for_clients = False
+
+            if self.client_socket:
+                self.log(INFO, "Closing client socket")
+                for conn in self.clients:
+                    conn.shutdown(socket.SHUT_RDWR)
+                    conn.close()
+
+                self.client_socket.shutdown(socket.SHUT_RDWR)
+                self.client_socket.close()
+
+            self.client_socket = None
+
+        self.leader = leader
+
+    def listen_for_clients(self):
+        while self.listening_for_clients and self.client_socket and self.running:
+            try:
+                self.client_socket.listen(1)
+                conn, addr = self.client_socket.accept()
+                self.clients.append(conn)
+
+                threading.Thread(target=self.handle_client, args=[conn, addr]).start()
+            except Exception as e:
+                self.log(ERROR, "Error while accepting client", e)
+                continue
+
+
+    def handle_client(self, conn, addr):
+        self.log(INFO, "New client connected", addr)
+
+        try:
+            while self.running:
+                data = conn.recv(1024)
+                if not data:
+                    break
+
+                if data.index(b": ") == -1:
+                    self.log(ERROR, "Received invalid message", data)
+                    continue
+
+                [m_type, message] = data.decode().split(": ", 1)
+
+                if m_type == "STORE":
+                    self.log(INFO, "Received STORE message", message)
+
+                    data = json.loads(message)
+
+                    while self.rep:
+                        time.sleep(1)
+
+
+                    self.rep = time.time()
+
+                    self.kv_cache[data["key"]] = data["value"]
+                    self.replicate_data()
+
+                    conn.send(str.encode("OK: " + json.dumps(data)))
+
+
+                elif m_type == "RETRIEVE":
+                    self.log(INFO, "Received RETRIEVE message", message)
+
+                    data = json.loads(message)
+
+                    if data["key"] not in self.kv_cache:
+                        value = None
+
+                    else:
+                        value = self.kv_cache[data["key"]]
+
+                    data["value"] = value
+
+                    conn.send(str.encode("DATA: " + json.dumps(data)))
+
+                else:
+                    self.log(ERROR, "Received unknown message", m_type, message)
+
+        except ConnectionResetError as e:
+            self.log(ERROR, "Connection reset by client", addr)
+            conn.close()
+            self.clients.remove(conn)
+
+    def replicate_data(self):
+        """this replicates the own data to all servers in the ring"""
+        assert self.leader == self.pid
+
+        self.rep = time.time()
+        self.replication = self.ring.copy()
+
+        # we remove ourself from the replication
+        # since we already have the data
+        self.replication.remove(self.pid)
+
+        for addr in self.replication:
+            if addr == self.pid:
+                continue
+
+            self.ring_socket.sendto(str.encode("REPLICATE: " + json.dumps(self.kv_cache)), addr_from_pid(addr))
+
+        while len(self.replication) > 0:
+            time.sleep(1)
+            self.log(INFO, "Waiting for replication to finish")
+
+        # replication done
+        self.rep = None
+
 
     def heartbeat_timout(self, pid):
         self.log(ERROR, "Heartbeat timeout for", pid)
@@ -66,8 +175,6 @@ class Server:
         self.heartbeats.pop(pid)
         self.broadcast_socket.sendto(str.encode("UPDATE: " + json.dumps(self.ring)), (BROADCAST_IP, BROADCAST_PORT))
 
-        # TODO: maybe this doesnt work here
-        # self.start_election()
 
     def clear_heartbeats(self):
         """This clears old hbs for left pids"""
@@ -76,7 +183,7 @@ class Server:
                 self.heartbeats.pop(pid)
 
     def monitor_heartbeats(self):
-        while self.listening:
+        while self.running:
             time.sleep(1)
             for pid in self.ring:
                 if pid == self.pid:
@@ -84,12 +191,12 @@ class Server:
 
                 elif pid not in self.heartbeats:
                     self.heartbeats[pid] =  {'last_hb': 0, 'sent_ping': time.time()} 
-                    self.ring_socket.sendto(str.encode("PING: " + json.dumps({'sender': self.pid})), self.addr_from_pid(pid))
+                    self.ring_socket.sendto(str.encode("PING: " + json.dumps({'sender': self.pid})), addr_from_pid(pid))
 
                 elif not self.heartbeats[pid]['sent_ping']:
                     if time.time() - self.heartbeats[pid]['last_hb'] > HEARTBEAT_INTERVAL:
                         self.heartbeats[pid]['sent_ping'] = time.time()
-                        self.ring_socket.sendto(str.encode("PING: " + json.dumps({'sender': self.pid})), self.addr_from_pid(pid))
+                        self.ring_socket.sendto(str.encode("PING: " + json.dumps({'sender': self.pid})), addr_from_pid(pid))
 
                 else:
                     # we got a 'sent_ping'
@@ -97,12 +204,13 @@ class Server:
                         self.heartbeat_timout(pid)
                         continue
 
+
     def listen(self):
         self.log(INFO, "Listening for messages now...")
 
-        while self.listening:
-            # This Line did it... A tribute for 2h of debugging.
+        while self.running:
             ready, _, _ = select.select([self.ring_socket, self.broadcast_socket], [], [])
+
             for s in ready:
                 try:
                     data, addr = s.recvfrom(1024)
@@ -114,6 +222,7 @@ class Server:
                     self.log(ERROR, "Received invalid message", data)
                     continue
 
+                self.log(ALL, "Received message", data)
                 [m_type, message] = data.decode().split(": ", 1)
 
                 if m_type == "ACCEPT":
@@ -121,7 +230,7 @@ class Server:
                     ring = json.loads(message)
                     self.ring = ring
                     nb_pid = ring[ring.index(self.pid) - 1]
-                    self.neighbour_addr = self.addr_from_pid(nb_pid)
+                    self.neighbour_addr = addr_from_pid(nb_pid)
 
                     self.start_election()
 
@@ -129,14 +238,22 @@ class Server:
                     self.log(ALL, "Received JOIN message", message)
                     if self.leader == self.pid:
                         self.ring.append(message)
+                        no_duplicates = list(set(self.ring))
+                        self.ring = no_duplicates
                         self.ring.sort()
 
+                        threading.Thread(target=self.replicate_data).start()
                         self.broadcast_socket.sendto(str.encode("ACCEPT: " + json.dumps(self.ring)), (BROADCAST_IP, BROADCAST_PORT))
 
 
                 elif m_type == "LEAVE":
                     self.log(ALL, "Received LEAVE message", message)
                     self.ring.remove(message)
+
+                    # if the pid was in a replication remove him as well
+                    if message in self.replication:
+                        self.replication.remove(message)
+
                     # distribute that new ring
                     self.broadcast_socket.sendto(str.encode("UPDATE: " + json.dumps(self.ring)), (BROADCAST_IP, BROADCAST_PORT))
 
@@ -164,8 +281,20 @@ class Server:
                     self.ring = ring
                     self.clear_heartbeats()
                     self.log(ALL, "New ring is", ring)
+
+                    if self.pid not in ring:
+                        self.log(ERROR, "I'm not in the ring anymore. restarting...")
+                        self.leader = None
+                        self.neighbour_addr = None
+                        self.ring = []
+                        self.kv_cache = {}
+
+                        self.broadcast_socket.sendto(str.encode("JOIN: " + self.pid), (BROADCAST_IP, BROADCAST_PORT))
+                        continue
+
+                    # Im still in the ring. continue normally
                     nb_pid = ring[ring.index(self.pid) - 1]
-                    self.neighbour_addr = self.addr_from_pid(nb_pid)
+                    self.neighbour_addr = addr_from_pid(nb_pid)
 
                     if self.leader not in ring:
                         # we lost our leader -> election
@@ -180,26 +309,17 @@ class Server:
                     #for addr in self.ring:
                         #self.ring_socket.sendto(str.encode("REPLICATE: ", json.dumps(self.kv_cache)), addr)
 
-                elif m_type == "STORE":
-                    if self.leader == self.pid:
-                        self.log(INFO, "Received STORE message", message)
-                        data = json.loads(message)
-                        if not data.get("key"):
-                            self.log(ERROR, "Invalid key 'None'", message)
-                        else:
-                            self.kv_cache[data.get("key")] = data.get("value")
-                            for addr in self.ring:
-                                self.ring_socket.sendto(message, addr)
-                    else:
-                        self.log(ALL, "Ignoring STORE message because I'm not the leader...", message)
+                elif m_type == "CONNECT":
+                    self.log(ALL, "Received CONNECT message", message)
 
-
-                elif m_type == "RETRIEVE":
+                    # We only respond if we are the leader. This ensures that if there is currently no leader, the join will timeout
                     if self.leader == self.pid:
-                        self.log(INFO, "Received RETRIEVE message", message)
-                        self.broadcast_socket.sendto(self.kv_cache.get(message), addr)
-                    else:
-                        self.log(ALL, "Ignoring RETRIEVE message because I'm not the leader...", message)
+                        self.log(ALL, "Sending leader message")
+                        self.broadcast_socket.sendto(str.encode("LEADER: " + str(self.client_socket_addr)), (BROADCAST_IP, BROADCAST_PORT))
+
+                elif m_type == "LEADER":
+                    # This is only from servers to clients
+                    self.log(ALL, "Received LEADER message", message)
 
 
                 elif m_type == "REPLICATE":
@@ -209,6 +329,18 @@ class Server:
                         self.log(INFO, "Replicating data from leader", message)
                         data = json.loads(message)
                         self.kv_cache = data
+
+                        self.ring_socket.sendto(str.encode("REP_OK: " + self.pid), addr)
+
+                elif m_type == "REP_OK":
+                    self.log(ALL, "Received REP_OK message", message)
+                    sender = message
+                    if self.rep and self.replication:
+                        if sender in self.replication:
+                            self.replication.remove(sender)
+                        else:
+                            print("ring", self.replication)
+                            self.log(ERROR, "Received REP_OK from addr that we no wait for", sender)
 
                 else:
                     self.log(ERROR, "Received unknown message", m_type, message)
@@ -221,22 +353,27 @@ class Server:
         threading.Timer(JOIN_TIMEOUT, self.create_ring).start()
 
 
+
+
+    def create_ring(self):
+        """gets called if the initial JOIN message timed out which means there is no existing ring and we should create the initial one"""
+        if not self.ring:
+            self.ring = [self.pid]
+            self.set_leader(self.pid)
+            self.log(INFO, "Creating initial ring with just only us since our JOIN message timed out after", JOIN_TIMEOUT, "second(s)")
+
+            self.log(INFO, "Also creating a empty cache since Im the only one")
+            self.kv_cache = {}
+
+
+# ELECTIONS
+
     def election_message(self, mid, isLeader):
         election_body = {
                 "mid": mid,
                 "isLeader": isLeader
         } 
         return "ELECTION: " + json.dumps(election_body)
-
-    def create_ring(self):
-        """gets called if the initial JOIN message timed out which means there is no existing ring and we should create the initial one"""
-        if not self.ring:
-            self.ring = [self.pid]
-            self.leader = self.pid
-            self.log(INFO, "Creating initial ring with just only us since our JOIN message timed out after", JOIN_TIMEOUT, "second(s)")
-
-            self.log(INFO, "Also creating a empty cache since Im the only one")
-            self.kv_cache = {}
 
     def start_election(self):
         self.in_election = True
@@ -254,7 +391,7 @@ class Server:
             if not self.in_election:
                 return
 
-            self.leader = election_body['mid']
+            self.set_leader(election_body['mid'])
             self.in_election =  False
 
             self.log(INFO, "new leader is", self.leader)
@@ -284,7 +421,7 @@ class Server:
                 self.ring_socket.sendto(election_message.encode(), self.neighbour_addr)
 
         elif election_body['mid'] == self.pid:
-            self.leader = self.pid
+            self.set_leader(self.pid)
             self.in_election = False
 
             self.log(INFO, "I am the new leader and forwarding election message")
@@ -293,47 +430,26 @@ class Server:
                 election_message = self.election_message(self.pid, True)
                 self.ring_socket.sendto(election_message.encode(), self.neighbour_addr)
 
+# UTILS
     def close(self):
         """greacefully close the server with a LEAVE message to the neighbour"""
 
         self.log(INFO, "Closing server")
-        self.listening = False
+        self.running = False
         if self.neighbour_addr:
             self.log(INFO, "sending a LEAVE messge to my neighbour")
             self.ring_socket.sendto(str.encode("LEAVE: " + self.pid), self.neighbour_addr)
         else:
             self.log(INFO, "I have no neighbour to send a LEAVE message to")
 
+        self.broadcast_socket.shutdown(socket.SHUT_RDWR)
         self.broadcast_socket.close()
+        self.ring_socket.shutdown(socket.SHUT_RDWR)
         self.ring_socket.close()
 
 
 
-def check_input():
-    print("[CONFIG] Help: \n\t'q' to [q]uit\n\t'c' to [c]rash\n\t'v' to toggle [v]erbosity\n\n")
-    while True:
-        text = input()
-        if text == "q":
-            print("[CONFIG] [q]uitting")
-            server.close()
-            sys.exit(0)
-
-        elif text == "c":
-            print("[CONFIG] [c]rashing")
-            sys.exit(1)
-
-        elif text.startswith('v'):
-            if len(text) == 2 and text[1].isdigit() and 0 <= int(text[1]) <= 3:
-                level = int(text[1])
-                global LOGGING_LEVEL
-                LOGGING_LEVEL = level
-                print("[CONFIG] set verbosity to:", level)
-            else:
-                print("[CONFIG] invalid verbosity level")
-
-
-
-
 if __name__ == '__main__':
-    threading.Thread(target=check_input).start()
     server = Server()
+    threading.Thread(target=check_input, args=[server]).start()
+    server.start()
