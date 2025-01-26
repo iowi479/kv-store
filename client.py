@@ -11,15 +11,13 @@ class Client:
 
     def __init__(self):
 
-        self.client_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        self.client_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        self.client_socket.bind(('', 0))
-
-        self.pid = MY_IP + ":" + str(self.client_socket.getsockname()[1])
+        self.pid = MY_IP + ":" + "TBD"
 
         self.listening = True
 
         self.log(INFO, "Starting client")
+
+        self.quit = False
 
 
 
@@ -53,6 +51,12 @@ class Client:
                             if m_type == "LEADER":
                                 self.log(INFO, "Received LEADER message: ", message)
                                 leader_addr = addr_from_pid(message)
+
+                                self.client_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                                self.client_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                                self.client_socket.bind(('', 0))
+
+                                self.pid = MY_IP + ":" + str(self.client_socket.getsockname()[1])
 
                                 self.log(INFO, "Connecting to leader", leader_addr)
                                 self.client_socket.connect(leader_addr)
@@ -153,7 +157,7 @@ class Client:
 
                     else:
                         self.log(ERROR, "Received unknown message", m_type, message)
-            self.close()
+            self.client_socket.close()
         except socket.error as e:
             self.log(ERROR, "Socket error occurred", str(e))
             self.listening = False
@@ -162,6 +166,7 @@ class Client:
 
     def close(self):
         self.listening = False
+        self.quit = True
         self.client_socket.shutdown(socket.SHUT_RDWR)
         self.client_socket.close()
 
@@ -170,29 +175,28 @@ class Client:
 def handle_actions(client):
     """handles user input as actions until the clients closes"""
 
-    while True:
-        if listen_thread.is_alive():
-            print("[CONFIG] Help: \n\t's' to [s]tore\n\t'r' to [r]retrieve\n\n")
-            text = input()
-            if text == "r":
-                print("Enter key:")
-                key = input().strip()
-                client.retrieve(key)
+    while not client.quit:
+        print("[CONFIG] Help: \n\t's' to [s]tore\n\t'r' to [r]retrieve\n\n")
+        text = input()
+        if text == "r":
+            print("Enter key:")
+            key = input().strip()
+            client.retrieve(key)
 
-            elif text == "s":
-                print("Enter key:")
-                key = input().strip()
-                print("Enter value:")
-                value = input().strip()
-                client.store(key,value)
+        elif text == "s":
+            print("Enter key:")
+            key = input().strip()
+            print("Enter value:")
+            value = input().strip()
+            client.store(key,value)
 
-            else:
-                check_single_input(text, client)
-                print("Invalid option")
+        else:
+            check_single_input(text, client)
+            print("Invalid option")
 
 def reconnect(client, listen_thread):
     """handles disconnects until the clients closes"""
-    while True:
+    while not client.quit:
         if not listen_thread.is_alive():
             client.log(ALL, "Connection lost, reconnecting...")
             client.connect()
