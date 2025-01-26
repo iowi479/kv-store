@@ -1,6 +1,6 @@
 import socket, threading, select, json, time
-from utils import addr_from_pid, check_input
-from conf import BROADCAST_PORT, BROADCAST_IP, MY_IP, MY_PORT, JOIN_TIMEOUT, HEARTBEAT_INTERVAL, HEARTBEAT_TIMEOUT, ALL, INFO, ERROR, LOGGING_LEVEL
+from utils import addr_from_pid, check_input, ThreadSafeKVCache
+from conf import BROADCAST_PORT, BROADCAST_IP, MY_IP, JOIN_TIMEOUT, HEARTBEAT_INTERVAL, HEARTBEAT_TIMEOUT, ALL, INFO, ERROR, LOGGING_LEVEL
 
 
 class Server:
@@ -11,17 +11,14 @@ class Server:
     def __init__(self):
         self.running = True
 
-        self.pid = MY_IP + ":" + str(MY_PORT)
         self.in_election = False
         self.ring = []
         self.neighbour_addr = None
         self.leader = None
-        self.kv_cache = {}
+        self.kv_cache = ThreadSafeKVCache()
         self.clients = []
 
         self.heartbeats = {}
-
-        self.log(INFO, "Starting server")
 
         self.broadcast_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.broadcast_socket.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
@@ -30,7 +27,10 @@ class Server:
 
         self.ring_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.ring_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        self.ring_socket.bind(('', MY_PORT))
+        self.ring_socket.bind(('', 0))
+        self.pid = MY_IP + ":" + str(self.ring_socket.getsockname()[1])
+
+        self.log(INFO, "Started server")
 
         self.client_socket = None
 
@@ -69,8 +69,13 @@ class Server:
                     conn.shutdown(socket.SHUT_RDWR)
                     conn.close()
 
-                self.client_socket.shutdown(socket.SHUT_RDWR)
-                self.client_socket.close()
+                try:
+                    self.client_socket.shutdown(socket.SHUT_RDWR)
+                except socket.error as e:
+                    print("Socket not connected or already closed:", e)
+                finally:
+                    self.client_socket.close()
+
 
             self.client_socket = None
 
@@ -115,7 +120,7 @@ class Server:
 
                     self.rep = time.time()
 
-                    self.kv_cache[data["key"]] = data["value"]
+                    self.kv_cache.set(data["key"],data["value"])
                     self.replicate_data()
 
                     conn.send(str.encode("OK: " + json.dumps(data)))
@@ -126,11 +131,7 @@ class Server:
 
                     data = json.loads(message)
 
-                    if data["key"] not in self.kv_cache:
-                        value = None
-
-                    else:
-                        value = self.kv_cache[data["key"]]
+                    value = self.kv_cache.get(data["key"])
 
                     data["value"] = value
 
@@ -159,7 +160,7 @@ class Server:
             if addr == self.pid:
                 continue
 
-            self.ring_socket.sendto(str.encode("REPLICATE: " + json.dumps(self.kv_cache)), addr_from_pid(addr))
+            self.ring_socket.sendto(str.encode("REPLICATE: " + json.dumps(self.kv_cache.get_dict())), addr_from_pid(addr))
 
         while len(self.replication) > 0:
             time.sleep(1)
@@ -287,7 +288,7 @@ class Server:
                         self.leader = None
                         self.neighbour_addr = None
                         self.ring = []
-                        self.kv_cache = {}
+                        self.kv_cache = ThreadSafeKVCache()
 
                         self.broadcast_socket.sendto(str.encode("JOIN: " + self.pid), (BROADCAST_IP, BROADCAST_PORT))
                         continue
@@ -328,7 +329,7 @@ class Server:
                     else:
                         self.log(INFO, "Replicating data from leader", message)
                         data = json.loads(message)
-                        self.kv_cache = data
+                        self.kv_cache = ThreadSafeKVCache(data)
 
                         self.ring_socket.sendto(str.encode("REP_OK: " + self.pid), addr)
 
@@ -363,7 +364,7 @@ class Server:
             self.log(INFO, "Creating initial ring with just only us since our JOIN message timed out after", JOIN_TIMEOUT, "second(s)")
 
             self.log(INFO, "Also creating a empty cache since Im the only one")
-            self.kv_cache = {}
+            self.kv_cache = ThreadSafeKVCache()
 
 
 # ELECTIONS

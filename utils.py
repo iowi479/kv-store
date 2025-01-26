@@ -1,5 +1,5 @@
 import sys
-
+import threading
 
 def addr_from_pid(pid) -> tuple[str, int]:
     ip, port = pid.split(":")
@@ -38,3 +38,34 @@ def check_single_input(text, to_close):
             print("[CONFIG] set verbosity to:", level)
         else:
             print("[CONFIG] invalid verbosity level")
+
+class ThreadSafeKVCache:
+    def __init__(self, dict = None):
+        if dict is None:
+            self._kv_cache = {}
+        else:
+            self._kv_cache = dict
+        self._lock = threading.Lock()
+
+    def set(self, key, value):
+        """Store in kv cache - locked to one thread"""
+        with self._lock:
+            self._kv_cache[key] = value
+
+    def get(self, key, default=None):
+        """retrieve from kv cache - no lock"""
+        return self._kv_cache.get(key, default)
+
+    def remove(self, key):
+        """remove from kv cache - locked to one thread"""
+        with self._lock:
+            if key in self._kv_cache:
+                del self._kv_cache[key]
+
+    def get_dict(self):
+        """get inner dict"""
+        return self._kv_cache
+
+    def __str__(self):
+        """return kv cache as string"""
+        return str(self._kv_cache)

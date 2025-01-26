@@ -1,6 +1,6 @@
 import socket, threading, select, json, time
 from utils import check_single_input, addr_from_pid
-from conf import BROADCAST_PORT, BROADCAST_IP, MY_IP, MY_PORT, CONNECT_TIMEOUT, ALL, INFO, ERROR, LOGGING_LEVEL
+from conf import BROADCAST_PORT, BROADCAST_IP, MY_IP, CONNECT_TIMEOUT, ALL, INFO, ERROR, LOGGING_LEVEL
 
 
 
@@ -10,11 +10,12 @@ class Client:
             print("[" + self.pid + "]", *messages)
 
     def __init__(self):
-        self.pid = MY_IP + ":" + str(MY_PORT)
 
         self.client_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.client_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        self.client_socket.bind(('', MY_PORT))
+        self.client_socket.bind(('', 0))
+
+        self.pid = MY_IP + ":" + str(self.client_socket.getsockname()[1])
 
         self.listening = True
 
@@ -117,8 +118,8 @@ class Client:
         self.log(INFO, "Listening for messages now...")
 
         closed = False
-        while self.listening and not closed:
-            try:
+        try:
+            while self.listening and not closed:
                 ready, _, _ = select.select([self.client_socket], [], [])
                 for s in ready:
                     data, addr = s.recvfrom(1024)
@@ -152,12 +153,12 @@ class Client:
 
                     else:
                         self.log(ERROR, "Received unknown message", m_type, message)
-
-            except socket.error as e:
-                self.log(ERROR, "Socket error occurred", str(e))
-                break
-
-        self.client_socket.close()
+            self.close()
+        except socket.error as e:
+            self.log(ERROR, "Socket error occurred", str(e))
+            self.listening = False
+            self.client_socket.close()
+             
 
     def close(self):
         self.listening = False
@@ -165,7 +166,8 @@ class Client:
         self.client_socket.close()
 
 
-def handle_actions(listen_thread, client):
+
+def handle_actions(client):
     """handles user input as actions until the clients closes"""
 
     while True:
@@ -188,12 +190,14 @@ def handle_actions(listen_thread, client):
                 check_single_input(text, client)
                 print("Invalid option")
 
-        else:
+def reconnect(client, listen_thread):
+    """handles disconnects until the clients closes"""
+    while True:
+        if not listen_thread.is_alive():
             client.log(ALL, "Connection lost, reconnecting...")
             client.connect()
             listen_thread = threading.Thread(target=client.listen)
             listen_thread.start()
-
 
 if __name__ == '__main__':
     client = Client()
@@ -202,4 +206,7 @@ if __name__ == '__main__':
     listen_thread = threading.Thread(target=client.listen)
     listen_thread.start()
 
-    handle_actions(listen_thread, client)
+    connection_thread = threading.Thread(target=reconnect, args=(client, listen_thread))
+    connection_thread.start()
+
+    handle_actions(client)
