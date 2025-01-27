@@ -3,7 +3,7 @@ from os import environ
 
 BROADCAST_PORT = 5000
 BROADCAST_IP = "192.168.0.255"
-MY_IP = environ['MY_IP']
+MY_IP = environ["MY_IP"]
 
 JOIN_TIMEOUT = 1
 CONNECT_TIMEOUT = 2

@@ -1,7 +1,7 @@
 import socket
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     BROADCAST_PORT = 5973
 
     MY_HOST = socket.gethostname()
@@ -11,9 +11,9 @@ if __name__ == '__main__':
     listen_socket.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
     listen_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
 
-    # dont use adress... use '' as default instead. 
+    # dont use adress... use '' as default instead.
     # This way we receive broadcast messages from all interfaces(localhost as well)
-    listen_socket.bind(('' , BROADCAST_PORT))
+    listen_socket.bind(("", BROADCAST_PORT))
 
     print("Listening to broadcast messages")
 

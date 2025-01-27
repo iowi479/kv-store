@@ -1,16 +1,14 @@
 import socket
 
 
-
-
-if __name__ == '__main__':
+if __name__ == "__main__":
     BROADCAST_IP = "192.168.0.255"
     BROADCAST_PORT = 5973
 
     MY_HOST = socket.gethostname()
     MY_IP = socket.gethostbyname(MY_HOST)
 
-    message = MY_IP + ' sent a broadcast'
+    message = MY_IP + " sent a broadcast"
 
     broadcast_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     broadcast_socket.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
@@ -29,7 +27,6 @@ if __name__ == '__main__':
 
     broadcast_socket.close()
 
-
     # 1. Send a broadcast message to all participants in the network
     # 2. Listen to a response from a participant
     #   2.1. If a response with the current members is received, add yourself to the list of members
@@ -40,4 +37,3 @@ if __name__ == '__main__':
     #   3.2. If there was a previous ring, the election determines the leader
 
     # 4. Wait for the election to finish
-

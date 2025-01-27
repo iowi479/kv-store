@@ -4,21 +4,27 @@ from multiprocessing import Process, Pipe
 
 def local_event(pid, clock):
     clock += 1
-    print('Process {} performed local event. Lamport timestamp is {}'.format(pid, clock))
+    print(
+        "Process {} performed local event. Lamport timestamp is {}".format(pid, clock)
+    )
     return clock
 
 
 def send_event(pipe, pid, clock):
     clock += 1
     pipe.send((pid, clock))
-    print('Process {} sent message. Lamport timestamp is {}'.format(pid, clock))
+    print("Process {} sent message. Lamport timestamp is {}".format(pid, clock))
     return clock
 
 
 def receive_event(pipe, pid, clock):
     sender_id, ts = pipe.recv()
     clock = max(ts, clock) + 1
-    print('Process {} received message from Process {}. Lamport timestamp is {}'.format(pid, sender_id, clock))
+    print(
+        "Process {} received message from Process {}. Lamport timestamp is {}".format(
+            pid, sender_id, clock
+        )
+    )
     return clock
 
 
@@ -49,7 +55,7 @@ def process_three(pipe32):
     clock = send_event(pipe32, pid, clock)
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     one_two, two_one = Pipe()
     two_three, three_two = Pipe()
 

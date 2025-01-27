@@ -9,10 +9,10 @@ def form_ring(members):
     return sorted_ip_ring
 
 
-def get_neighbour(ring, current_node_ip, direction='left'):
+def get_neighbour(ring, current_node_ip, direction="left"):
     current_node_index = ring.index(current_node_ip) if current_node_ip in ring else -1
     if current_node_index != -1:
-        if direction == 'left':
+        if direction == "left":
             if current_node_index + 1 == len(ring):
                 return ring[0]
             else:
@@ -26,8 +26,14 @@ def get_neighbour(ring, current_node_ip, direction='left'):
         return None
 
 
-members = ['192.168.0.1', '130.234.204.2', '130.234.203.2', '130.234.204.1', '182.4.3.111']
+members = [
+    "192.168.0.1",
+    "130.234.204.2",
+    "130.234.203.2",
+    "130.234.204.1",
+    "182.4.3.111",
+]
 print(members)
 ring = form_ring(members)
-neighbour = get_neighbour(ring, '130.234.203.2', 'left')
+neighbour = get_neighbour(ring, "130.234.203.2", "left")
 print(neighbour)
