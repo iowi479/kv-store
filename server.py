@@ -1,4 +1,4 @@
-import socket, threading, select, json, time
+import socket, threading, select, json, time, uuid
 from utils import addr_from_pid, check_input, ThreadSafeKVCache
 from conf import (
     BROADCAST_PORT,
@@ -30,6 +30,7 @@ class Server:
         self.clients = []
 
         self.heartbeats = {}
+        self.acks = set()
 
         self.broadcast_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.broadcast_socket.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
@@ -45,14 +46,54 @@ class Server:
 
         self.client_socket = None
 
-        self.rep = None
-        self.replication = []
+        self.rep_t = 0
 
     def start(self):
-        threading.Thread(target=self.listen).start()
-        threading.Thread(target=self.monitor_heartbeats).start()
+        listen_thread = threading.Thread(target=self.listen)
+        listen_thread.start()
+        
+        hb_thread = threading.Thread(target=self.monitor_heartbeats)
+        hb_thread.start()
 
         self.send_join()
+
+    def send_reliable_threaded(self, data, addr, message_type):
+        """Run send_reliable() in a separate thread"""
+        
+        thread = threading.Thread(target=self.send_reliable, args=(data, addr, message_type))
+        thread.daemon = True  # Daemon thread will exit if the main program stops
+        thread.start()
+
+    def send_reliable(self, data, addr, message_type, max_retries=5, timeout=2):
+        """
+        Send a message reliably by waiting for an acknowledgment.
+        
+        :param message: The message string to send.
+        :param addr: The recipient's address (IP, Port).
+        :param max_retries: Maximum retries before giving up.
+        :param timeout: Time to wait for an ACK before retrying.
+        """
+        
+        ack = str(uuid.uuid4())
+        self.acks.add(ack)
+        data["ack"] = ack
+        message = str.encode(f"{message_type}: " + json.dumps(data))
+        
+        for attempt in range(max_retries):
+            self.ring_socket.sendto(message , addr)
+            self.log(INFO, f"Sent {message} to {addr}, waiting for ACK... (Attempt {attempt+1})")
+
+            time.sleep(timeout)
+
+            if ack not in self.acks:
+                self.log(INFO, f"Message to {addr} delivered")
+                return True
+
+            self.log(INFO, f"No ACK received from {addr}, retrying...")
+
+        self.acks.discard(ack)
+        self.log(ERROR, f"Failed to deliver {message} to {addr} after {max_retries} attempts")
+        return False  # Message delivery failed
 
     def set_leader(self, leader):
         if leader == self.pid:
@@ -66,7 +107,10 @@ class Server:
             )
 
             self.listening_for_clients = True
-            threading.Thread(target=self.listen_for_clients).start()
+            
+            accept_thread = threading.Thread(target=self.listen_for_clients)
+            accept_thread.daemon = True
+            accept_thread.start()
 
             return
 
@@ -98,7 +142,10 @@ class Server:
                 conn, addr = self.client_socket.accept()
                 self.clients.append(conn)
 
-                threading.Thread(target=self.handle_client, args=[conn, addr]).start()
+                client_thread = threading.Thread(target=self.handle_client, args=[conn, addr])
+                client_thread.daemon = True
+                client_thread.start()
+
             except Exception as e:
                 self.log(ERROR, "Error while accepting client", e)
                 continue
@@ -122,11 +169,6 @@ class Server:
                     self.log(INFO, "Received STORE message", message)
 
                     data = json.loads(message)
-
-                    while self.rep:
-                        time.sleep(1)
-
-                    self.rep = time.time()
 
                     self.kv_cache.set(data["key"], data["value"])
                     self.replicate_data()
@@ -156,28 +198,27 @@ class Server:
         """this replicates the own data to all servers in the ring"""
         assert self.leader == self.pid
 
-        self.rep = time.time()
-        self.replication = self.ring.copy()
+        self.rep_t = time.time()
+        replication = self.ring.copy()
 
         # we remove ourself from the replication
         # since we already have the data
-        self.replication.remove(self.pid)
+        replication.remove(self.pid)
 
-        for addr in self.replication:
+        replication_data = {
+            "rep_t": self.rep_t,
+            "data": self.kv_cache.get_dict()
+        }
+
+        for addr in replication:
             if addr == self.pid:
                 continue
 
-            self.ring_socket.sendto(
-                str.encode("REPLICATE: " + json.dumps(self.kv_cache.get_dict())),
+            self.send_reliable_threaded(
+                replication_data,
                 addr_from_pid(addr),
+                "REPLICATE"
             )
-
-        while len(self.replication) > 0:
-            time.sleep(1)
-            self.log(INFO, "Waiting for replication to finish")
-
-        # replication done
-        self.rep = None
 
     def heartbeat_timout(self, pid):
         self.log(ERROR, "Heartbeat timeout for", pid)
@@ -267,7 +308,9 @@ class Server:
                         self.ring = no_duplicates
                         self.ring.sort()
 
-                        threading.Thread(target=self.replicate_data).start()
+                        replication_thread = threading.Thread(target=self.replicate_data)
+                        replication_thread.start()
+
                         self.broadcast_socket.sendto(
                             str.encode("ACCEPT: " + json.dumps(self.ring)),
                             (BROADCAST_IP, BROADCAST_PORT),
@@ -276,10 +319,6 @@ class Server:
                 elif m_type == "LEAVE":
                     self.log(ALL, "Received LEAVE message", message)
                     self.ring.remove(message)
-
-                    # if the pid was in a replication remove him as well
-                    if message in self.replication:
-                        self.replication.remove(message)
 
                     # distribute that new ring
                     self.broadcast_socket.sendto(
@@ -308,6 +347,12 @@ class Server:
                 elif m_type == "UPDATE":
                     self.log(ALL, "Received UPDATE message with ring: ", message)
                     ring = json.loads(message)
+                    
+                    #remove pid of neighbor if not in ring
+                    for pid in self.ring:
+                        if pid not in ring and self.neighbour_addr == pid:
+                            self.neighbour_addr == None
+                    
                     self.ring = ring
                     self.clear_heartbeats()
                     self.log(ALL, "New ring is", ring)
@@ -335,7 +380,9 @@ class Server:
 
                 elif m_type == "ELECTION":
                     self.log(ALL, "Received ELECTION message", message)
-                    self.handle_election(json.loads(message))
+                    data_message = json.loads(message)
+                    self.ring_socket.sendto(str.encode("ACK: " + data_message['ack']), addr)
+                    self.handle_election(data_message)
 
                     # TODO: I think this doesnt work. Handle_election is only handeling a single message. With this, we replicate after every message in the election process
                     # for addr in self.ring:
@@ -363,24 +410,17 @@ class Server:
                         )
                     else:
                         self.log(INFO, "Replicating data from leader", message)
-                        data = json.loads(message)
-                        self.kv_cache = ThreadSafeKVCache(data)
+                        data_message = json.loads(message)
+                        
+                        if self.rep_t < data_message['rep_t']:
+                            self.rep_t = data_message['rep_t']
+                            self.kv_cache = ThreadSafeKVCache(data_message['data'])
 
-                        self.ring_socket.sendto(str.encode("REP_OK: " + self.pid), addr)
-
-                elif m_type == "REP_OK":
-                    self.log(ALL, "Received REP_OK message", message)
-                    sender = message
-                    if self.rep and self.replication:
-                        if sender in self.replication:
-                            self.replication.remove(sender)
-                        else:
-                            print("ring", self.replication)
-                            self.log(
-                                ERROR,
-                                "Received REP_OK from addr that we no wait for",
-                                sender,
-                            )
+                        self.ring_socket.sendto(str.encode("ACK: " + data_message['ack']), addr)
+                
+                elif m_type == "ACK":
+                    self.log(INFO, "Received ACK", message)
+                    self.acks.discard(message)
 
                 else:
                     self.log(ERROR, "Received unknown message", m_type, message)
@@ -413,7 +453,7 @@ class Server:
 
     def election_message(self, mid, isLeader):
         election_body = {"mid": mid, "isLeader": isLeader}
-        return "ELECTION: " + json.dumps(election_body)
+        return election_body
 
     def start_election(self):
         self.in_election = True
@@ -424,7 +464,7 @@ class Server:
             election_message = self.election_message(self.pid, False)
             self.log(ALL, "Sending election message to neighbour", self.neighbour_addr)
             self.log(ALL, "Election message:", election_message)
-            self.ring_socket.sendto(election_message.encode(), self.neighbour_addr)
+            self.send_reliable_threaded(election_message, self.neighbour_addr, "ELECTION")
 
     def handle_election(self, election_body):
         if election_body["isLeader"]:
@@ -438,7 +478,7 @@ class Server:
 
             if self.neighbour_addr:
                 election_message = self.election_message(self.leader, True)
-                self.ring_socket.sendto(election_message.encode(), self.neighbour_addr)
+                self.send_reliable_threaded(election_message, self.neighbour_addr, "ELECTION")
 
             return
 
@@ -449,7 +489,7 @@ class Server:
 
             if self.neighbour_addr:
                 election_message = self.election_message(self.pid, False)
-                self.ring_socket.sendto(election_message.encode(), self.neighbour_addr)
+                self.send_reliable_threaded(election_message, self.neighbour_addr, "ELECTION")
 
         elif election_body["mid"] > self.pid:
             self.in_election = True
@@ -458,7 +498,7 @@ class Server:
 
             if self.neighbour_addr:
                 election_message = self.election_message(election_body["mid"], False)
-                self.ring_socket.sendto(election_message.encode(), self.neighbour_addr)
+                self.send_reliable_threaded(election_message, self.neighbour_addr, "ELECTION")
 
         elif election_body["mid"] == self.pid:
             self.set_leader(self.pid)
@@ -468,7 +508,7 @@ class Server:
 
             if self.neighbour_addr:
                 election_message = self.election_message(self.pid, True)
-                self.ring_socket.sendto(election_message.encode(), self.neighbour_addr)
+                self.send_reliable_threaded(election_message, self.neighbour_addr, "ELECTION")
 
     # UTILS
     def close(self):
@@ -484,13 +524,27 @@ class Server:
         else:
             self.log(INFO, "I have no neighbour to send a LEAVE message to")
 
-        self.broadcast_socket.shutdown(socket.SHUT_RDWR)
-        self.broadcast_socket.close()
-        self.ring_socket.shutdown(socket.SHUT_RDWR)
-        self.ring_socket.close()
+        try:
+            # Shutdown and close the broadcast socket
+            if self.broadcast_socket:
+                self.broadcast_socket.shutdown(socket.SHUT_RDWR)
+                self.broadcast_socket.close()
+            
+            # Shutdown and close the ring socket
+            if self.ring_socket:
+                self.ring_socket.shutdown(socket.SHUT_RDWR)
+                self.ring_socket.close()
+
+        except socket.error as e:
+            self.log(ERROR, "Problem with shutting down sockets")
+        
+        self.log(INFO, "Server closed")
 
 
 if __name__ == "__main__":
     server = Server()
-    threading.Thread(target=check_input, args=[server]).start()
+    
+    input_thread = threading.Thread(target=check_input, args=[server])
+    input_thread.start()
+    
     server.start()
