@@ -224,10 +224,17 @@ class Server:
         self.log(ERROR, "Heartbeat timeout for", pid)
         self.ring.remove(pid)
         self.heartbeats.pop(pid)
-        self.broadcast_socket.sendto(
-            str.encode("UPDATE: " + json.dumps(self.ring)),
-            (BROADCAST_IP, BROADCAST_PORT),
-        )
+
+        for addr in self.ring:
+            update_data = {
+                "ring": self.ring.copy()
+            }
+
+            self.send_reliable_threaded(
+                update_data,
+                addr_from_pid(addr),
+                "UPDATE"
+            )
 
     def clear_heartbeats(self):
         """This clears old hbs for left pids"""
@@ -293,9 +300,12 @@ class Server:
 
                 if m_type == "ACCEPT":
                     self.log(ALL, "Received ACCEPT message with ring: ", message)
-                    ring = json.loads(message)
-                    self.ring = ring
-                    nb_pid = ring[ring.index(self.pid) - 1]
+                    data_message = json.loads(message)
+                    
+                    self.ring_socket.sendto(str.encode("ACK: " + data_message["ack"]), addr)
+                    
+                    self.ring = data_message["ring"]
+                    nb_pid = self.ring[self.ring.index(self.pid) - 1]
                     self.neighbour_addr = addr_from_pid(nb_pid)
 
                     self.start_election()
@@ -311,20 +321,32 @@ class Server:
                         replication_thread = threading.Thread(target=self.replicate_data)
                         replication_thread.start()
 
-                        self.broadcast_socket.sendto(
-                            str.encode("ACCEPT: " + json.dumps(self.ring)),
-                            (BROADCAST_IP, BROADCAST_PORT),
-                        )
+                        for addr in self.ring:
+                            accept_data = {
+                                "ring": self.ring.copy()
+                            }
+
+                            self.send_reliable_threaded(
+                                accept_data,
+                                addr_from_pid(addr),
+                                "ACCEPT"
+                            )
 
                 elif m_type == "LEAVE":
                     self.log(ALL, "Received LEAVE message", message)
                     self.ring.remove(message)
 
                     # distribute that new ring
-                    self.broadcast_socket.sendto(
-                        str.encode("UPDATE: " + json.dumps(self.ring)),
-                        (BROADCAST_IP, BROADCAST_PORT),
-                    )
+                    for addr in self.ring:
+                        update_data = {
+                            "ring": self.ring.copy()
+                        }
+
+                        self.send_reliable_threaded(
+                            update_data,
+                            addr_from_pid(addr),
+                            "UPDATE"
+                        )
 
                 elif m_type == "PING":
                     self.log(ALL, "Received PING message", message)
@@ -346,7 +368,11 @@ class Server:
 
                 elif m_type == "UPDATE":
                     self.log(ALL, "Received UPDATE message with ring: ", message)
-                    ring = json.loads(message)
+                    data_message = json.loads(message)
+                    
+                    self.ring_socket.sendto(str.encode("ACK: " + data_message["ack"]), addr)
+                    
+                    ring = data_message["ring"]
                     
                     #remove pid of neighbor if not in ring
                     for pid in self.ring:
@@ -380,8 +406,9 @@ class Server:
 
                 elif m_type == "ELECTION":
                     self.log(ALL, "Received ELECTION message", message)
+
                     data_message = json.loads(message)
-                    self.ring_socket.sendto(str.encode("ACK: " + data_message['ack']), addr)
+                    self.ring_socket.sendto(str.encode("ACK: " + data_message["ack"]), addr)
                     self.handle_election(data_message)
 
                     # TODO: I think this doesnt work. Handle_election is only handeling a single message. With this, we replicate after every message in the election process
@@ -411,13 +438,13 @@ class Server:
                     else:
                         self.log(INFO, "Replicating data from leader", message)
                         data_message = json.loads(message)
-                        
-                        if self.rep_t < data_message['rep_t']:
-                            self.rep_t = data_message['rep_t']
-                            self.kv_cache = ThreadSafeKVCache(data_message['data'])
 
-                        self.ring_socket.sendto(str.encode("ACK: " + data_message['ack']), addr)
-                
+                        self.ring_socket.sendto(str.encode("ACK: " + data_message["ack"]), addr)
+                        
+                        if self.rep_t < data_message["rep_t"]:
+                            self.rep_t = data_message["rep_t"]
+                            self.kv_cache = ThreadSafeKVCache(data_message["data"])
+
                 elif m_type == "ACK":
                     self.log(INFO, "Received ACK", message)
                     self.acks.discard(message)
