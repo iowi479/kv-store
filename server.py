@@ -31,6 +31,7 @@ class Server:
 
         self.heartbeats = {}
         self.acks = set()
+        self.acks_received = set()
 
         self.broadcast_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.broadcast_socket.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
@@ -302,13 +303,17 @@ class Server:
                     self.log(ALL, "Received ACCEPT message with ring: ", message)
                     data_message = json.loads(message)
                     
-                    self.ring_socket.sendto(str.encode("ACK: " + data_message["ack"]), addr)
-                    
-                    self.ring = data_message["ring"]
-                    nb_pid = self.ring[self.ring.index(self.pid) - 1]
-                    self.neighbour_addr = addr_from_pid(nb_pid)
+                    ack = data_message["ack"]
+                    self.ring_socket.sendto(str.encode("ACK: " + ack), addr)
 
-                    self.start_election()
+                    #only act on message if no duplicate
+                    if ack not in self.acks_received:
+                        self.acks_received.add(ack)
+                        self.ring = data_message["ring"]
+                        nb_pid = self.ring[self.ring.index(self.pid) - 1]
+                        self.neighbour_addr = addr_from_pid(nb_pid)
+
+                        self.start_election()
 
                 elif m_type == "JOIN":
                     self.log(ALL, "Received JOIN message", message)
@@ -370,46 +375,55 @@ class Server:
                     self.log(ALL, "Received UPDATE message with ring: ", message)
                     data_message = json.loads(message)
                     
-                    self.ring_socket.sendto(str.encode("ACK: " + data_message["ack"]), addr)
+                    ack = data_message["ack"]
+                    self.ring_socket.sendto(str.encode("ACK: " + ack), addr)
                     
-                    ring = data_message["ring"]
-                    
-                    #remove pid of neighbor if not in ring
-                    for pid in self.ring:
-                        if pid not in ring and self.neighbour_addr == pid:
+                    #only act if no duplicate
+                    if ack not in self.acks_received:
+                        self.acks_received.add(ack)
+                        ring = data_message["ring"]
+                        
+                        #remove pid of neighbor if not in ring
+                        if self.neighbour_addr[0] + ":" + str(self.neighbour_addr[1]) not in ring:
                             self.neighbour_addr == None
-                    
-                    self.ring = ring
-                    self.clear_heartbeats()
-                    self.log(ALL, "New ring is", ring)
+                        
+                        self.ring = ring
+                        self.clear_heartbeats()
+                        self.log(ALL, "New ring is", ring)
 
-                    if self.pid not in ring:
-                        self.log(ERROR, "I'm not in the ring anymore. restarting...")
-                        self.leader = None
-                        self.neighbour_addr = None
-                        self.ring = []
-                        self.kv_cache = ThreadSafeKVCache()
+                        if self.pid not in ring:
+                            self.log(ERROR, "I'm not in the ring anymore. restarting...")
+                            self.leader = None
+                            self.neighbour_addr = None
+                            self.ring = []
+                            self.kv_cache = ThreadSafeKVCache()
 
-                        self.broadcast_socket.sendto(
-                            str.encode("JOIN: " + self.pid),
-                            (BROADCAST_IP, BROADCAST_PORT),
-                        )
-                        continue
+                            self.broadcast_socket.sendto(
+                                str.encode("JOIN: " + self.pid),
+                                (BROADCAST_IP, BROADCAST_PORT),
+                            )
+                            continue
 
-                    # Im still in the ring. continue normally
-                    nb_pid = ring[ring.index(self.pid) - 1]
-                    self.neighbour_addr = addr_from_pid(nb_pid)
+                        # Im still in the ring. continue normally
+                        nb_pid = ring[ring.index(self.pid) - 1]
+                        self.neighbour_addr = addr_from_pid(nb_pid)
 
-                    if self.leader not in ring:
-                        # we lost our leader -> election
-                        self.start_election()
+                        if self.leader not in ring:
+                            # we lost our leader -> election
+                            self.start_election()
 
                 elif m_type == "ELECTION":
                     self.log(ALL, "Received ELECTION message", message)
 
                     data_message = json.loads(message)
-                    self.ring_socket.sendto(str.encode("ACK: " + data_message["ack"]), addr)
-                    self.handle_election(data_message)
+
+                    ack = data_message["ack"]
+                    self.ring_socket.sendto(str.encode("ACK: " + ack), addr)
+                    
+                    #only act on message if no duplicate
+                    if ack not in self.acks_received:
+                        self.acks_received.add(ack)
+                        self.handle_election(data_message)
 
                     # TODO: I think this doesnt work. Handle_election is only handeling a single message. With this, we replicate after every message in the election process
                     # for addr in self.ring:
@@ -438,12 +452,16 @@ class Server:
                     else:
                         self.log(INFO, "Replicating data from leader", message)
                         data_message = json.loads(message)
-
-                        self.ring_socket.sendto(str.encode("ACK: " + data_message["ack"]), addr)
                         
-                        if self.rep_t < data_message["rep_t"]:
-                            self.rep_t = data_message["rep_t"]
-                            self.kv_cache = ThreadSafeKVCache(data_message["data"])
+                        ack = data_message["ack"]
+                        self.ring_socket.sendto(str.encode("ACK: " + ack), addr)
+
+                        #only act on message if no duplicate
+                        if ack not in self.acks_received:
+                            self.acks_received.add(ack)
+                            if self.rep_t < data_message["rep_t"]:
+                                self.rep_t = data_message["rep_t"]
+                                self.kv_cache = ThreadSafeKVCache(data_message["data"])
 
                 elif m_type == "ACK":
                     self.log(INFO, "Received ACK", message)
