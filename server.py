@@ -4,7 +4,7 @@ from conf import (
     BROADCAST_PORT,
     BROADCAST_IP,
     MY_IP,
-    JOIN_TIMEOUT,
+    JOIN_RETRY,
     HEARTBEAT_INTERVAL,
     HEARTBEAT_TIMEOUT,
     ALL,
@@ -21,6 +21,7 @@ class Server:
 
     def __init__(self):
         self.running = True
+        self.joining = False
 
         self.in_election = False
         self.ring = []
@@ -301,6 +302,7 @@ class Server:
 
                 if m_type == "ACCEPT":
                     self.log(ALL, "Received ACCEPT message with ring: ", message)
+                    self.joining = False
                     data_message = json.loads(message)
                     
                     ack = data_message["ack"]
@@ -394,10 +396,7 @@ class Server:
                             self.ring = []
                             self.kv_cache = ThreadSafeKVCache()
 
-                            self.broadcast_socket.sendto(
-                                str.encode("JOIN: " + self.pid),
-                                (BROADCAST_IP, BROADCAST_PORT),
-                            )
+                            self.send_join()
                             continue
 
                         # Im still in the ring. continue normally
@@ -467,13 +466,21 @@ class Server:
                     self.log(ERROR, "Received unknown message", m_type, message)
 
     def send_join(self):
-        self.broadcast_socket.sendto(
-            str.encode("JOIN: " + self.pid), (BROADCAST_IP, BROADCAST_PORT)
-        )
+        self.joining = True
+        for _ in range(JOIN_RETRY):
+            if self.joining:
+                self.log(INFO, "Trying to join...")
+                self.broadcast_socket.sendto(
+                    str.encode("JOIN: " + self.pid), (BROADCAST_IP, BROADCAST_PORT)
+                )
+            else:
+                return
+            time.sleep(3)
 
-        # TODO: check timeout to create ring with just us if nothing exists
-        # should work like this
-        threading.Timer(JOIN_TIMEOUT, self.create_ring).start()
+        # create ring with only this server if no answer after 5 tries with 3 second delay
+        if self.joining:
+            self.joining = False
+            self.create_ring()
 
     def create_ring(self):
         """gets called if the initial JOIN message timed out which means there is no existing ring and we should create the initial one"""
@@ -483,8 +490,8 @@ class Server:
             self.log(
                 INFO,
                 "Creating initial ring with just only us since our JOIN message timed out after",
-                JOIN_TIMEOUT,
-                "second(s)",
+                JOIN_RETRY,
+                "tries with 3 second delay",
             )
 
             self.log(INFO, "Also creating a empty cache since Im the only one")
