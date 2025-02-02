@@ -383,10 +383,6 @@ class Server:
                         self.acks_received.add(ack)
                         ring = data_message["ring"]
                         
-                        #remove pid of neighbor if not in ring
-                        if self.neighbour_addr[0] + ":" + str(self.neighbour_addr[1]) not in ring:
-                            self.neighbour_addr == None
-                        
                         self.ring = ring
                         self.clear_heartbeats()
                         self.log(ALL, "New ring is", ring)
