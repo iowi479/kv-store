@@ -58,8 +58,8 @@ class Client:
 
                             [m_type, message] = data.decode().split(": ", 1)
 
-                            if m_type == "LEADER":
-                                self.log(INFO, "Received LEADER message: ", message)
+                            if m_type == "CONNECT_OK":
+                                self.log(INFO, "Received CONNECT_OK message: ", message)
                                 leader_addr = addr_from_pid(message)
 
                                 self.client_socket = socket.socket(

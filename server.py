@@ -431,13 +431,13 @@ class Server:
                     if self.leader == self.pid:
                         self.log(ALL, "Sending leader message")
                         self.broadcast_socket.sendto(
-                            str.encode("LEADER: " + str(self.client_socket_addr)),
+                            str.encode("CONNECT_OK: " + str(self.client_socket_addr)),
                             (BROADCAST_IP, BROADCAST_PORT),
                         )
 
-                elif m_type == "LEADER":
+                elif m_type == "CONNECT_OK":
                     # This is only from servers to clients
-                    self.log(ALL, "Received LEADER message", message)
+                    self.log(ALL, "Received CONNECT_OK message", message)
 
                 elif m_type == "REPLICATE":
                     if self.leader == self.pid:
