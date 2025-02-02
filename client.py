@@ -18,7 +18,7 @@ class Client:
             print("[" + self.pid + "]", *messages)
 
     def __init__(self):
-
+        # port is determined on tcp socket creation and updated then
         self.pid = MY_IP + ":" + "TBD"
 
         self.listening = True
@@ -28,6 +28,7 @@ class Client:
         self.quit = False
 
     def connect(self):
+        # setup socket for dynamic server discovery
         broadcast_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         broadcast_socket.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
         broadcast_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -42,6 +43,7 @@ class Client:
                     str.encode("CONNECT: " + self.pid), (BROADCAST_IP, BROADCAST_PORT)
                 )
 
+                # wait for answer to connect request until connected or timeout reached
                 connect_time = time.time()
                 while time.time() - connect_time < CONNECT_TIMEOUT and not connected:
                     try:
@@ -50,7 +52,7 @@ class Client:
                         )
 
                         for s in ready:
-                            data, addr = s.recvfrom(1024)
+                            data, _ = s.recvfrom(1024)
 
                             if data.index(b": ") == -1:
                                 self.log(ERROR, "Received invalid message", data)
@@ -59,9 +61,11 @@ class Client:
                             [m_type, message] = data.decode().split(": ", 1)
 
                             if m_type == "CONNECT_OK":
+                                # received answer to connect request
                                 self.log(INFO, "Received CONNECT_OK message: ", message)
                                 leader_addr = addr_from_pid(message)
 
+                                # make TCP socket
                                 self.client_socket = socket.socket(
                                     socket.AF_INET, socket.SOCK_STREAM
                                 )
@@ -70,12 +74,14 @@ class Client:
                                 )
                                 self.client_socket.bind(("", 0))
 
+                                # update PID with the new port
                                 self.pid = (
                                     MY_IP
                                     + ":"
                                     + str(self.client_socket.getsockname()[1])
                                 )
 
+                                # connect to leader server
                                 self.log(INFO, "Connecting to leader", leader_addr)
                                 self.client_socket.connect(leader_addr)
 
@@ -91,10 +97,10 @@ class Client:
                                     ERROR, "Received unknown message", m_type, message
                                 )
 
-                    except socket.error as e:
+                    except (socket.error, OSError) as e:
                         self.log(
                             ERROR,
-                            "Socket error during select or receiving data:",
+                            "Error during store or receiving data:",
                             str(e),
                         )
                         break
@@ -105,7 +111,7 @@ class Client:
 
         try:
             broadcast_socket.close()
-        except socket.error as e:
+        except (socket.error, OSError) as e:
             self.log(ERROR, "Error while closing broadcast socket:", str(e))
 
     def store(self, key, value):
@@ -113,13 +119,11 @@ class Client:
         try:
             data_body = {"key": key, "value": value}
 
-            # Send data over the socket
             self.client_socket.send(str.encode("STORE: " + json.dumps(data_body)))
             self.log(INFO, "Sent STORE message: ", data_body)
 
-        except socket.error as e:
-            # Handle socket-related errors (e.g., connection issues)
-            self.log(ERROR, "Socket error while sending STORE message:", e)
+        except (socket.error, OSError) as e:
+            self.log(ERROR, "Error while sending STORE message:", str(e))
 
     def retrieve(self, key):
         """handles the retrieve command"""
@@ -128,11 +132,11 @@ class Client:
             self.client_socket.send(str.encode("RETRIEVE: " + json.dumps(data_body)))
             self.log(INFO, f"Sent RETRIEVE message: {key}")
 
-        except socket.error as e:
-            # Handle socket-related errors (e.g., connection issues)
+        except (socket.error, OSError) as e:
             self.log(
                 ERROR,
-                "Socket error while sending RETRIEVE message:",
+                "Error while sending RETRIEVE message:",
+                str(e),
             )
 
     def listen(self):
@@ -140,10 +144,11 @@ class Client:
 
         closed = False
         try:
+            # listen for messages until the connection is closed or listening has been ordered to end otherwise
             while self.listening and not closed:
                 ready, _, _ = select.select([self.client_socket], [], [])
                 for s in ready:
-                    data, addr = s.recvfrom(1024)
+                    data, _ = s.recvfrom(1024)
 
                     if not data:
                         self.log(ERROR, "No data received, socket may be closed")
@@ -157,6 +162,7 @@ class Client:
                     [m_type, message] = data.decode().split(": ", 1)
 
                     if m_type == "DATA":
+                        # answer to retieve command
                         self.log(INFO, "Received DATA message: ", message)
 
                         data = json.loads(message)
@@ -165,6 +171,7 @@ class Client:
                         print("Data received: ", data)
 
                     elif m_type == "OK":
+                        # answer to store command
                         self.log(INFO, "Received OK message: ", message)
 
                         data = json.loads(message)
@@ -175,16 +182,21 @@ class Client:
                     else:
                         self.log(ERROR, "Received unknown message", m_type, message)
             self.client_socket.close()
-        except socket.error as e:
-            self.log(ERROR, "Socket error occurred", str(e))
+        except (socket.error, OSError) as e:
+            self.log(ERROR, "Error occurred while listening for messages", str(e))
             self.listening = False
             self.client_socket.close()
 
     def close(self):
+        """handles graceful shutdown"""
         self.listening = False
         self.quit = True
-        self.client_socket.shutdown(socket.SHUT_RDWR)
-        self.client_socket.close()
+        
+        try:
+            self.client_socket.shutdown(socket.SHUT_RDWR)
+            self.client_socket.close()
+        except (socket.error, OSError) as e:
+            self.log(ERROR, "Error occurred while shutting down socket", str(e))
 
 
 def handle_actions(client):
@@ -213,7 +225,8 @@ def handle_actions(client):
 def reconnect(client, listen_thread):
     """handles disconnects until the clients closes"""
     while not client.quit:
-        if not listen_thread.is_alive():
+        time.sleep(CONNECT_TIMEOUT)
+        if not listen_thread.is_alive() and not client.quit:
             client.log(ALL, "Connection lost, reconnecting...")
             client.connect()
             listen_thread = threading.Thread(target=client.listen)
@@ -224,9 +237,11 @@ if __name__ == "__main__":
     client = Client()
     client.connect()
 
+    # start listen thread
     listen_thread = threading.Thread(target=client.listen)
     listen_thread.start()
 
+    # start reconnect thread
     connection_thread = threading.Thread(target=reconnect, args=(client, listen_thread))
     connection_thread.start()
 

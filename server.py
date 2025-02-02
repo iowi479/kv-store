@@ -66,7 +66,7 @@ class Server:
         thread.daemon = True  # Daemon thread will exit if the main program stops
         thread.start()
 
-    def send_reliable(self, data, addr, message_type, max_retries=5, timeout=2):
+    def send_reliable(self, data, addr, message_type, max_retries=5, timeout=3):
         """
         Send a message reliably by waiting for an acknowledgment.
         
