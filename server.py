@@ -239,8 +239,9 @@ class Server:
         self.log(ERROR, "Heartbeat timeout for", pid)
         
         # remove time out server's PID from global view
-        self.ring.remove(pid)
-        self.heartbeats.pop(pid)
+        if pid in self.ring:
+            self.ring.remove(pid)
+        self.heartbeats.pop(pid, None)
 
         # propagate update
         for addr in self.ring:
@@ -372,7 +373,9 @@ class Server:
 
                 elif m_type == "LEAVE":
                     self.log(ALL, "Received LEAVE message", message)
-                    self.ring.remove(message)
+                    
+                    if message in self.ring:
+                        self.ring.remove(message)
 
                     # propagate updated global view
                     for addr in self.ring:
