@@ -2,7 +2,7 @@ from os import environ
 
 
 BROADCAST_PORT = 5000
-BROADCAST_IP = "192.168.0.255"
+BROADCAST_IP = "255.255.255.255"
 MY_IP = environ["MY_IP"]
 
 JOIN_RETRY = 5
